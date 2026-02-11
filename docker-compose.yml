@@ -1,0 +1,132 @@
+services:
+  # PostgreSQL 데이터베이스
+  postgres:
+    image: postgres:16-alpine
+    container_name: secuhub-postgres
+    environment:
+      POSTGRES_DB: secuhub
+      POSTGRES_USER: secuhub
+      POSTGRES_PASSWORD: secuhub_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U secuhub"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Redis 메시지 브로커
+  redis:
+    image: redis:7-alpine
+    container_name: secuhub-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI 애플리케이션
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: secuhub-api
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://secuhub:secuhub_dev_password@postgres:5432/secuhub
+      - DATABASE_URL_SYNC=postgresql://secuhub:secuhub_dev_password@postgres:5432/secuhub
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=dev-secret-key-change-in-production
+      - ACCESS_TOKEN_EXPIRE_MINUTES=480
+      - ENVIRONMENT=development
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+      - evidence_files:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Celery Worker
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: secuhub-worker
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://secuhub:secuhub_dev_password@postgres:5432/secuhub
+      - DATABASE_URL_SYNC=postgresql://secuhub:secuhub_dev_password@postgres:5432/secuhub
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=dev-secret-key-change-in-production
+    volumes:
+      - ./backend:/app
+      - evidence_files:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.core.celery_app worker --loglevel=info
+
+  # Celery Beat 스케줄러
+  beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: secuhub-beat
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://secuhub:secuhub_dev_password@postgres:5432/secuhub
+      - DATABASE_URL_SYNC=postgresql://secuhub:secuhub_dev_password@postgres:5432/secuhub
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=dev-secret-key-change-in-production
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: celery -A app.core.celery_app beat --loglevel=info
+
+  # Vue 3 프론트엔드 (개발 서버)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: secuhub-frontend
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000
+
+  # Nginx 리버스 프록시 (프로덕션용)
+  nginx:
+    image: nginx:alpine
+    container_name: secuhub-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/conf.d:/etc/nginx/conf.d
+    depends_on:
+      - api
+      - frontend
+    profiles:
+      - production
+
+volumes:
+  postgres_data:
+  redis_data:
+  evidence_files:
